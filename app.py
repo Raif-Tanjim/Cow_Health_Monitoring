@@ -1,213 +1,179 @@
 import streamlit as st
-import pandas as pd
-import numpy as np
-import joblib
-import json
-import os
-from pathlib import Path
 
-# =========================================================
-# Page configuration
-# =========================================================
+# ================= MUST BE FIRST STREAMLIT COMMAND =================
 st.set_page_config(
-    page_title="Cow Health Monitoring Dashboard",
+    page_title="Cow Health Monitoring",
     layout="centered"
 )
 
-st.title("🐄 Cow Health Monitoring Dashboard")
-st.caption(
-    "Thermal-based early warning system for cow health and milk production support"
-)
+# ================= IMPORTS =================
+import json
+import time
+import numpy as np
+import joblib
+from pathlib import Path
 
-st.divider()
+# ================= CONFIG =================
+ARTIFACTS = "artifacts"
+PARTS = ["udder", "eye", "leg", "hoof", "etc"]
+FEATURES = ["delta_mean", "delta_max", "frame_std", "humidity"]
 
-# =========================================================
-# Load model artifacts
-# =========================================================
+CONTROL_DIR = Path("shared/control")
+OUTPUT_DIR = Path("shared/output")
+CONTROL_FILE = CONTROL_DIR / "body_part.json"
+RESULT_FILE = OUTPUT_DIR / "latest_result.json"
+IMAGE_FILE = OUTPUT_DIR / "latest_image.png"
+
+# ================= SAFE DIRECTORY CREATION =================
+CONTROL_DIR.mkdir(parents=True, exist_ok=True)
+OUTPUT_DIR.mkdir(parents=True, exist_ok=True)
+
+# ================= LOAD MODELS (MANUAL MODE) =================
 @st.cache_resource
-def load_artifacts():
+def load_models():
     gmm_models = {}
     scalers = {}
 
-    # Load GMM models
-    for fname in os.listdir("artifacts/gmm_models"):
-        part = fname.replace("gmm_", "").replace(".joblib", "")
-        gmm_models[part] = joblib.load(f"artifacts/gmm_models/{fname}")
+    for p in PARTS:
+        gmm_models[p] = joblib.load(f"{ARTIFACTS}/gmm_models/gmm_{p}.joblib")
+        scalers[p] = joblib.load(f"{ARTIFACTS}/scalers/scaler_{p}.joblib")
 
-    # Load scalers
-    for fname in os.listdir("artifacts/scalers"):
-        part = fname.replace("scaler_", "").replace(".joblib", "")
-        scalers[part] = joblib.load(f"artifacts/scalers/{fname}")
-
-    # Load thresholds
-    with open("artifacts/config/thresholds.json", "r") as f:
+    with open(f"{ARTIFACTS}/config/thresholds.json") as f:
         thresholds = json.load(f)
 
     return gmm_models, scalers, thresholds
 
 
-gmm_models, scalers, thresholds = load_artifacts()
+gmm_models, scalers, thresholds = load_models()
 
-FEATURES = ["delta_mean", "delta_max", "frame_std", "humidity"]
-
-# =========================================================
-# Helper functions
-# =========================================================
-def compute_gmm_score(row):
-    part = row["cow_part"]
-
-    if part not in gmm_models:
-        return None
-
-    x = pd.DataFrame(
-        [[row[f] for f in FEATURES]],
-        columns=FEATURES
-    )
-
-    x_scaled = scalers[part].transform(x)
-    return gmm_models[part].score_samples(x_scaled)[0]
-
-
-def infer_condition(row):
-    if row["abnormal"] == 0:
-        return "Normal", "NONE", 0.0, "No action needed."
-
-    confidence = round(min(1.0, abs(row["gmm_score"]) / 6), 2)
-
-    if row["cow_part"] == "udder":
+# ================= ADVICE LOGIC =================
+def generate_advice(condition, severity):
+    if condition == "normal":
         return (
-            "Mastitis Suspected",
-            "HIGH" if confidence > 0.6 else "MEDIUM",
-            confidence,
-            "Inspect udder, increase milking frequency, consult veterinarian."
+            "No abnormal thermal pattern detected.",
+            "Continue routine monitoring."
         )
 
-    if row["cow_part"] in ["hoof", "leg"]:
-        return (
-            "Lameness Suspected",
-            "HIGH" if confidence > 0.6 else "MEDIUM",
-            confidence,
-            "Inspect hooves and legs, reduce movement, consult veterinarian."
-        )
+    if condition == "mastitis_suspected":
+        explanation = "Elevated udder temperature detected."
+        action = "Inspect udder and milk quality."
+    elif condition == "lameness_suspected":
+        explanation = "Localized heat detected in leg or hoof."
+        action = "Inspect hooves and reduce movement."
+    else:
+        explanation = "Abnormal thermal pattern detected."
+        action = "Recheck and observe closely."
 
-    if row["cow_part"] in ["eye", "body"]:
-        return (
-            "Fever or Infection Suspected",
-            "MEDIUM",
-            confidence,
-            "Monitor cow closely and consult veterinarian if temperature remains high."
-        )
+    if severity == "HIGH":
+        action = "Immediate attention recommended. " + action
 
-    return (
-        "Abnormal (Unspecified)",
-        "LOW",
-        confidence,
-        "Monitor cow and recheck later."
-    )
+    return explanation, action
 
-# =========================================================
-# Mode selection
-# =========================================================
-st.subheader("⚙️ Input Mode")
+# ================= UI =================
+st.title("🐄 Cow Health Monitoring Dashboard")
+st.caption("Thermal-based early warning system (Edge AI)")
 
 mode = st.radio(
-    "Select data source:",
-    ["Manual Input (Demo Mode)", "Live Sensor Input (Raspberry Pi)"]
+    "Select operation mode",
+    ["Manual Inspection", "Live Sensor Mode"],
+    horizontal=True
 )
 
-st.divider()
+# ==========================================================
+# 🟢 MANUAL INSPECTION MODE
+# ==========================================================
+if mode == "Manual Inspection":
 
-# =========================================================
-# MODE 1 — MANUAL INPUT
-# =========================================================
-if mode == "Manual Input (Demo Mode)":
+    st.subheader("Manual Thermal Feature Input")
 
-    st.subheader("📥 Manual Thermal Feature Input")
+    body_part = st.selectbox("Body Part", PARTS)
 
-    with st.form("manual_input"):
-        cow_part = st.selectbox(
-            "Body Part",
-            ["udder", "hoof", "leg", "eye", "body"]
+    delta_mean = st.number_input("Δ Mean Temperature (°C)", value=1.5)
+    delta_max = st.number_input("Δ Max Temperature (°C)", value=2.5)
+    frame_std = st.number_input("Thermal Variability (Std)", value=2.0)
+    humidity = st.number_input("Humidity (%)", value=70.0)
+
+    if st.button("Run Health Assessment"):
+
+        x = np.array([[delta_mean, delta_max, frame_std, humidity]])
+        x_scaled = scalers[body_part].transform(x)
+
+        score = gmm_models[body_part].score_samples(x_scaled)[0]
+        threshold = thresholds[body_part]
+
+        abnormal = score < threshold
+
+        if not abnormal:
+            condition = "normal"
+            confidence = 0.0
+        else:
+            confidence = min(1.0, (threshold - score) / abs(threshold))
+            if body_part == "udder":
+                condition = "mastitis_suspected"
+            elif body_part in ["leg", "hoof"]:
+                condition = "lameness_suspected"
+            else:
+                condition = "abnormal_unspecified"
+
+        severity = (
+            "HIGH" if confidence > 0.6
+            else "MEDIUM" if confidence > 0.3
+            else "LOW"
         )
 
-        delta_mean = st.number_input("Δ Mean Temperature (°C)", value=1.5)
-        delta_max = st.number_input("Δ Max Temperature (°C)", value=2.5)
-        frame_std = st.number_input("Thermal Variability (Std)", value=2.0)
-        humidity = st.number_input("Humidity (%)", value=70.0)
-
-        submitted = st.form_submit_button("Analyze Cow Health")
-
-    if submitted:
-        row = {
-            "cow_part": cow_part,
-            "delta_mean": delta_mean,
-            "delta_max": delta_max,
-            "frame_std": frame_std,
-            "humidity": humidity
-        }
-
-        gmm_score = compute_gmm_score(row)
-        abnormal = int(gmm_score < thresholds[cow_part])
-
-        row["gmm_score"] = gmm_score
-        row["abnormal"] = abnormal
-
-        condition, severity, confidence, advice = infer_condition(row)
+        explanation, action = generate_advice(condition, severity)
 
         st.divider()
-        st.subheader("🩺 Health Assessment Result")
+        st.subheader("Assessment Result")
 
-        if severity == "NONE":
-            st.success("✅ Cow Condition: NORMAL")
-        elif severity == "HIGH":
-            st.error("🚨 HIGH RISK DETECTED")
-        else:
-            st.warning("⚠️ Attention Required")
+        st.metric("Condition", condition)
+        st.metric("Severity", severity)
+        st.metric("Confidence", f"{confidence*100:.1f}%")
 
-        st.markdown(f"""
-        **Detected Condition:** {condition}  
-        **Affected Body Part:** {cow_part.capitalize()}  
-        **Severity Level:** {severity}
-        """)
+        st.info(explanation)
+        st.warning(action)
 
-        st.markdown("### 🔎 Detection Confidence")
-        st.progress(confidence)
-        st.caption(f"Confidence: **{int(confidence * 100)}%**")
-
-        st.info(f"**Recommended Action:** {advice}")
-
-# =========================================================
-# MODE 2 — LIVE SENSOR INPUT (PI → FILE)
-# =========================================================
+# ==========================================================
+# 🔵 LIVE SENSOR MODE
+# ==========================================================
 else:
-    st.subheader("📡 Live Cow Health Status (From Raspberry Pi)")
 
-    RESULT_FILE = Path("latest_result.json")
+    st.subheader("Live Raspberry Pi Monitoring")
 
-    if RESULT_FILE.exists():
-        with open(RESULT_FILE, "r") as f:
-            result = json.load(f)
+    body_part = st.selectbox(
+        "Body Part Being Captured",
+        PARTS,
+        index=0
+    )
 
-        severity = result.get("severity", "NONE")
-        confidence = result.get("confidence", 0.0)
+    # Write control file ONLY in Live mode
+    with open(CONTROL_FILE, "w") as f:
+        json.dump({"body_part": body_part}, f)
 
-        if severity == "NONE":
-            st.success("✅ Cow Condition: NORMAL")
-        elif severity == "HIGH":
-            st.error("🚨 HIGH RISK DETECTED")
-        else:
-            st.warning("⚠️ Attention Required")
+    placeholder = st.empty()
 
-        st.markdown(f"""
-        **Detected Condition:** {result.get("condition", "Unknown").replace('_',' ').title()}  
-        **Body Part:** {result.get("cow_part", "Unknown").title()}  
-        **Severity Level:** {severity}  
-        **Timestamp:** {result.get("timestamp", "N/A")}
-        """)
+    while True:
+        try:
+            with open(RESULT_FILE) as f:
+                result = json.load(f)
 
-        st.markdown("### 🔎 Detection Confidence")
-        st.progress(confidence)
-        st.caption(f"Confidence: **{int(confidence * 100)}%**")
+            with placeholder.container():
 
-    else:
-        st.info("Waiting for live sensor data from Raspberry Pi...")
+                if IMAGE_FILE.exists():
+                    st.image(
+                        str(IMAGE_FILE),
+                        caption="Live Thermal View",
+                        use_column_width=True
+                    )
+
+                st.metric("Condition", result["condition"])
+                st.metric("Severity", result["severity"])
+                st.metric("Confidence", f"{result['confidence']*100:.1f}%")
+
+                st.info(result["explanation"])
+                st.warning(result["action"])
+
+        except FileNotFoundError:
+            st.info("Waiting for Raspberry Pi data...")
+
+        time.sleep(2)
