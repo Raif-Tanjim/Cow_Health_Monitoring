@@ -1,0 +1,11 @@
+{
+  "features": [
+    "delta_mean",
+    "delta_max",
+    "frame_std",
+    "humidity"
+  ],
+  "model_type": "GMM",
+  "n_components": 2,
+  "threshold_percentile": 5
+}
